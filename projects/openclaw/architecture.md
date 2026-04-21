@@ -4,40 +4,63 @@
 
 ## Execution Flow
 
+The full request-to-response path:
+
 ```
-Discord message
-  → OpenClaw Gateway (port 18789)
-    → Agent: LLM (gpt-4.1-mini)
-      → Bash script (headless Chrome CDP)
-        → ReadyMode UI at arpagrowth.readymode.com
-          → Result reported back to Discord
+Discord message (manager/agent)
+        |
+        v
+OpenClaw Gateway (port 18789, localhost only)
+        |
+        v
+Agent LLM — gpt-4.1-mini
+  1. Understands intent (NLP)
+  2. Extracts parameters (username, states, campaigns, etc.)
+  3. Asks for confirmation if destructive operation
+  4. Identifies the correct bash script via decision table
+  5. Executes: exec script.sh [params] (yieldMs: 120,000ms)
+        |
+        v
+Bash Script (autonomous — no LLM involvement)
+  - Login via Chrome headless CDP
+  - Navigate via UI clicks (never direct URL)
+  - Fill forms, click buttons, handle popups
+  - Output: single-line JSON {"success": true/false, "message": "..."}
+        |
+        v
+Agent LLM
+  6. Parses JSON result
+  7. Responds to manager in natural language (ES or EN)
+        |
+        v
+Discord response in #readymode-soporte
 ```
 
 ---
 
 ## Design Decisions
 
-### D1 — tools.deny: ["browser"]
+### D1 — `tools.deny: ["browser"]`
 
-**Decision:** The agent is explicitly prohibited from calling the browser directly.
+**Decision:** The agent LLM is explicitly blocked from calling the browser tool directly. It can only execute bash scripts, which internally use `openclaw browser` as a subprocess.
 
-**Reasoning:** Without this constraint, the agent would attempt to navigate and fill forms itself, leading to brittle, non-reproducible behavior. All browser interaction is encapsulated in bash scripts that are testable, auditable, and consistent. The agent's only job is to understand intent, extract parameters, and dispatch the correct script.
-
----
-
-### D2 — Dispatcher Pattern (not conversational guide)
-
-**Decision:** The agent's role is: understand intent → extract params → execute script → report result. It does not guide the user through manual steps.
-
-**Reasoning:** The agent has operational knowledge of every ReadyMode workflow. Without explicit constraints, it will share that knowledge conversationally — telling the manager what to click rather than doing it. The dispatcher rewrite (see Incident 1) eliminated this behavior entirely.
+**Reasoning:** This was a deliberate architectural decision made after the agent kept trying to manually guide users through steps in Discord instead of actually executing operations. This forces a single controlled path: the agent's only job is to understand the request, extract parameters, and fire the right script. All DOM logic, selectors, and browser interactions live exclusively inside the scripts — never in the agent's context.
 
 ---
 
-### D3 — UI Clicks, Not Direct URLs
+### D2 — Dispatcher Pattern, Not Conversational Guide
+
+**Decision:** The agent is a **pure dispatcher**: receive request → confirm if needed → execute script → report result. It never describes how operations work internally.
+
+**Reasoning:** Early versions behaved as a conversational assistant, explaining how to do things manually in Discord. This was wrong. The agent was rewritten entirely. Without the dispatcher constraint, an agent with operational knowledge will share that knowledge conversationally rather than executing.
+
+---
+
+### D3 — Navigation via UI Clicks, Never Direct URLs
 
 **Decision:** All navigation happens by clicking links within the dashboard (using `a.dash_link` selectors). Direct URL navigation is only used for a small set of known-safe routes (`/+Team/ManageLicenses`).
 
-**Reasoning:** ReadyMode is a React SPA that bootstraps client-side state from the dashboard. Direct URL navigation skips this bootstrap, leaving the app in an uninitialized state that renders an empty DOM (see Incident 5).
+**Reasoning:** ReadyMode is a React SPA. Navigating directly to URLs like `/+Team/ManageUsers` returns a blank DOM because the app hasn't bootstrapped client-side state. All navigation must happen by clicking links in the dashboard, exactly as a human would (see Incident 5).
 
 ---
 
@@ -54,7 +77,7 @@ nativeInputValueSetter.call(input, value);
 input.dispatchEvent(new Event('input', { bubbles: true }));
 ```
 
-**Reasoning:** ReadyMode uses React controlled components. Setting `input.value` directly bypasses React's synthetic event system — the component's state never updates, so the form submits the original empty value (see Incidents 3 & 10).
+**Reasoning:** ReadyMode's input fields are controlled React components. Standard `input.value = 'x'` doesn't trigger React's state management, so the field appears filled but submits empty. Used in login, password setting, and user creation (see Incidents 3 & 10).
 
 ---
 
@@ -64,13 +87,13 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 
 **Key rule:** "If the script output is ambiguous or still running, you must report that honestly. Never fabricate success."
 
-**Reasoning:** LLMs fill silence with plausible-sounding answers. When a script takes longer than expected and the agent sees "Command still running", it will sometimes report success to avoid appearing stuck (see Incident 7). Explicit rules + `yieldMs: 120000` prevent this.
+**Reasoning:** A `yieldMs` of 120,000ms (2 minutes) gives scripts enough time to complete before the agent evaluates the result. Polling between script checks has a minimum of 20 seconds and a maximum of 4 polls to avoid saturating the gateway (see Incidents 7 & 9).
 
 ---
 
 ### D6 — Confirmation Before Destructive Operations
 
-**Decision:** Any operation that cannot be undone requires an explicit confirmation from the Discord user before executing.
+**Decision:** Before executing Clear Licenses or any operation that affects multiple agents, the bot asks the manager to confirm ("Confirmas?").
 
 **Reasoning:** Operations like Reset Leads permanently delete queue data. A misunderstood command or a test message from a manager should never trigger irreversible actions without a clear confirmation step.
 
@@ -78,63 +101,72 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 
 ## Server Infrastructure
 
-| Field | Value |
-|-------|-------|
-| Provider | DigitalOcean |
+| Component | Detail |
+|-----------|--------|
+| Provider | DigitalOcean NYC3 |
 | IP | 159.89.179.179 |
-| OS | Ubuntu 24.04 |
+| OS | Ubuntu 24.04.3 LTS |
 | RAM | 2 GB + 2 GB swap |
+| Disk | 87 GB (15% used) |
 | Swap config | `vm.swappiness=10`, `vm.vfs_cache_pressure=50` |
+| Reverse proxy | Caddy (TLS, aurora.nheo.ai) |
+| Tunnel | cloudflared (agent.nheo.ai) |
+| Database | PostgreSQL 16 via Docker |
+| DB admin | pgAdmin4 via Docker |
 
-### Ports
+### Ports — Internal Only (localhost)
 
-| Port | Service | Exposure |
-|------|---------|----------|
-| 18789 | OpenClaw Gateway | Internal |
-| 18792 | OpenClaw secondary | Internal |
-| 3000 | Aurora (dashboard) | Internal |
-| 5432 | PostgreSQL | Internal |
-| 5050 | pgAdmin | Internal |
-| 22 | SSH | External |
-| 80 | HTTP (Caddy) | External |
-| 443 | HTTPS (Caddy) | External |
+| Port | Service |
+|------|---------|
+| 18789 | OpenClaw Gateway |
+| 18792 | OpenClaw Gateway WebSocket |
+| 3000 | Aurora (Next.js) |
+| 5432 | PostgreSQL |
+| 5050 | pgAdmin4 |
+
+### Ports — Exposed to Internet
+
+| Port | Service |
+|------|---------|
+| 22 | SSH |
+| 80 | HTTP (redirects to 443) |
+| 443 | HTTPS (Caddy) |
 
 ### systemd Services
 
-| Service | Role |
-|---------|------|
-| `openclaw-gateway` | Main OpenClaw gateway — receives Discord messages, dispatches to LLM |
-| `openclaw-bg-dispatcher` | Background task dispatcher |
-| `openclaw-bg-worker` | Background task worker |
-| `openclaw-owner-policy` | Owner policy enforcement |
-| `aurora` | OpenClaw web dashboard |
-| `caddy` | Reverse proxy + automatic TLS |
-| `cloudflared` | Cloudflare tunnel (currently runs as root — see Security Audit F-10) |
+| Service | User | Description |
+|---------|------|-------------|
+| `openclaw-gateway` | agent | Core gateway — receives Discord messages, dispatches to agent |
+| `openclaw-bg-dispatcher` | agent | Processes background commands |
+| `openclaw-bg-worker` | agent | Background task worker |
+| `openclaw-owner-policy` | agent | WhatsApp message parser |
+| `aurora` | agent | Next.js web application |
+| `caddy` | caddy | Reverse proxy + TLS |
+| `cloudflared` | root | Cloudflare tunnel (currently runs as root — flagged in security audit F-10) |
 
 ---
 
 ## Workspace File Structure
 
-```
-/workspace/
-├── AGENTS.md          # Agent behavior: dispatcher pattern, anti-hallucination rules, polling limits
-├── SKILL.md           # Operation knowledge: what each script does, params, expected output
-├── SOUL.md            # Agent personality and tone guidelines
-├── IDENTITY.md        # Agent identity definition
-├── _lib.sh            # Shared library: readymode_login(), readymode_logout(), dismiss_blocking_overlays()
-├── clear_licenses.sh  # Operation 1: sign out inactive users
-├── reset_leads.sh     # Operation 2: reset agent leads queue (blocked)
-├── create_user.sh     # Operation 3: create ReadyMode agent account
-└── upload_leads.sh    # Operation 4: upload leads CSV to campaign
-```
+| File | Purpose |
+|------|---------|
+| `AGENTS.md` | Agent behavior rules: dispatcher pattern, confirmation logic, anti-hallucination, polling limits, bilingual response |
+| `SKILL.md` | Decision table (which script maps to which intent) + full KB for conversational support |
+| `SOUL.md` | Tone and personality definition |
+| `IDENTITY.md` | Who the agent is (role, name, context) |
+| `_lib.sh` | Shared bash functions used by all scripts |
+| `clear_licenses.sh` | Automates the Clear Licenses flow |
+| `reset_leads.sh` | Automates Reset Leads (currently blocked) |
+| `create_user.sh` | Automates Create User steps 1–4 (playlist steps pending) |
+| `upload_leads.sh` | Automates CSV upload and campaign assignment |
 
 ### `_lib.sh` — Shared Functions
 
 | Function | Purpose |
 |----------|---------|
-| `readymode_login()` | Login via CDP — uses `#login-account`, `#login-password`, `.sign-in` selectors. Applies native value setter for password field. |
-| `readymode_logout()` | Logout by appending `?logout=1` to current URL |
-| `dismiss_blocking_overlays()` | Scans for known overlay selectors (e.g., `#phone_test_ui` z-index 600) after login and dismisses them. Runs silently if no overlay present. |
+| `readymode_login()` | Navigates to the login page, fills credentials using the native value setter pattern, dismisses overlays post-login. Selectors: `#login-account`, `#login-password`, `.sign-in` |
+| `readymode_logout()` | Appends `?logout=1` to the URL to force logout |
+| `dismiss_blocking_overlays()` | Detects and closes modal overlays (e.g., `#phone_test_ui` with z-index 600) that block post-login clicks. These overlays appear inconsistently and were a significant source of early failures |
 
 ---
 
@@ -150,16 +182,77 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 
 ## Architecture Improvement Proposal — 3-Layer Memory
 
-**Problem:** All context (global rules, local operation knowledge, script details) is loaded into every agent interaction, inflating context size unnecessarily.
+**Proposed by:** Miguel Legarda — 2026-04-16  
+**Status:** Not yet implemented — pending team decision  
+**Estimated effort:** ~2 days, low risk
 
-**Proposed solution:** Split into 3 layers:
+### The Problem
 
-| Layer | Contents | Loaded when |
-|-------|----------|-------------|
-| Global | Dispatcher rules, anti-hallucination rules, polling limits, confirmation policy | Always |
-| Local | Knowledge for the specific operation being executed | After intent identified |
-| Script | Technical details (selectors, CDP patterns) | Only inside the script itself |
+The current agent LLM receives the entire workspace context on every turn: `AGENTS.md` (164 lines), `SKILL.md` (175 lines), `SOUL.md`, `IDENTITY.md`, and more. This includes information the agent never directly uses — DOM selectors, React gotchas, historical incident notes, full operation flows step-by-step. The scripts handle all of that, not the agent.
 
-**Expected benefit:** ~60% context reduction per interaction. Faster inference, lower cost, more focused agent behavior.
+Approximately **40% of the agent's context window is consumed by irrelevant technical detail.** Consequences: less space for actual conversation, higher latency per turn, the agent occasionally tries to "help" with DOM details it has no business mentioning, and adding a new operation means editing a large tangled `AGENTS.md` file.
 
-**Status:** Proposal — not yet implemented.
+### The Proposal — 3-Layer Memory Separation
+
+| Layer | Contents | Used by | Lives in |
+|-------|----------|---------|----------|
+| Global Memory (persistent) | Available operations, required parameters, decision table, KB troubleshooting, support phone number | Agent LLM | `OPERATIONS.md` + `KNOWLEDGE.md` |
+| Local Memory (per session) | Behavioral rules: language, Discord format, when to confirm, anti-hallucination rules, polling limits | Agent LLM | `BEHAVIOR.md` |
+| Script Logic (autonomous) | DOM selectors, React gotchas, SPA navigation rules, overlay handling, incident workarounds, step-by-step flows | Only the bash scripts | `_lib.sh` + inline script comments |
+
+### Proposed Execution Flow (Post-Refactor)
+
+```
+Discord message
+    |
+    v
+Agent LLM (lightweight context: BEHAVIOR + OPERATIONS + KNOWLEDGE ~140 lines)
+    1. Understands user intent
+    2. Extracts required parameters
+    3. Looks up decision table → identifies script
+    4. exec script.sh with params (yieldMs: 120,000ms)
+    |
+    v
+Bash Script (fully autonomous — all DOM logic internal)
+    - Login, navigation, form fills, drag-and-drop
+    - All gotchas and workarounds live here
+    - Output: JSON {"success": true/false, "message": "..."}
+    |
+    v
+Agent LLM
+    5. Parses JSON
+    6. Responds in natural language
+    |
+    v
+Discord response
+```
+
+### File Restructuring Plan
+
+| Current file | Proposed destination | What changes |
+|-------------|---------------------|---------------|
+| `AGENTS.md` (164 lines) | `BEHAVIOR.md` (~50 lines) | Only behavioral rules remain: language, format, confirmation logic, anti-hallucination, polling limits |
+| `SKILL.md` (175 lines) | `OPERATIONS.md` (~40 lines) + `KNOWLEDGE.md` (~50 lines) | Decision table + params go to OPERATIONS. KB troubleshooting goes to KNOWLEDGE. DOM flows and few-shot examples removed |
+| DOM flows, selectors, gotchas, incidents (currently in AGENTS.md) | Deleted from agent context | Moved to inline comments inside each bash script |
+| `SOUL.md` + `IDENTITY.md` | No change | Already lightweight (<40 lines total) |
+
+**Net result:** Agent context shrinks from ~340 lines to ~140 lines — a ~60% reduction.
+
+### Benefits
+
+1. **Less hallucination risk.** Without DOM selectors and technical flows in its context, the agent physically cannot improvise with selectors or explain manual steps.
+2. **Faster responses.** Fewer tokens in context = lower latency per LLM call.
+3. **Easier maintenance.** Adding a new operation = create a bash script + add one row to the decision table in `OPERATIONS.md`.
+4. **Clean debugging separation.** Agent problems live in `BEHAVIOR.md`. Automation problems live in the scripts.
+5. **Scripts become self-documented.** Moving gotchas into script comments means the next engineer opening `create_user.sh` will find everything they need.
+
+### Implementation Plan
+
+| Phase | Task | Effort |
+|-------|------|--------|
+| A | Create `BEHAVIOR.md`, `OPERATIONS.md`, `KNOWLEDGE.md` by splitting and trimming existing files | 1 day |
+| B | Move DOM details, selectors, and gotchas into inline comments in each bash script | 0.5 days |
+| C | Test that agent still handles all operations and KB scenarios correctly with reduced context | 0.5 days |
+| **Total** | **Low risk — scripts do not change, only context files** | **~2 days** |
+
+> **Decision needed:** The team should decide whether to implement this before or after closing the remaining feature gaps (G01–G10). Since it's independent and low-risk, it can run in parallel. If G01–G04 (Create User playlist) are about to be implemented, it may be cleaner to do the refactor first so the new script is written into the already-clean architecture.

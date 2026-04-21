@@ -2,6 +2,8 @@
 
 These are the 13 scenarios where the agent provides support guidance to managers rather than executing automation. The agent answers in the same language as the incoming message (ES/EN).
 
+> **Key rule on "log out and back in":** This is the most common fix, but it should only be suggested *after* making a change or verifying the agent's configuration — never as a reflexive first response. Overusing it without checking first loses credibility with managers.
+
 ---
 
 ## S01 — No Assignments / Agents Not Receiving Calls
@@ -23,7 +25,7 @@ These are the 13 scenarios where the agent provides support guidance to managers
 1. Verify the playlist contains multiple states.
 2. Check that all target states are within their calling hour windows.
 3. Ask the agent to log out and log back in.
-4. If still single-state: escalate to manager — the playlist may need reconfiguration.
+4. If still single-state: temporarily remove the highest-pickup state from the playlist and re-add it — this forces a reset. Escalate to manager if persists.
 
 ---
 
@@ -36,13 +38,13 @@ These are the 13 scenarios where the agent provides support guidance to managers
 2. Verify at least one state on the playlist is within calling hours.
 3. Check that at least one campaign on the playlist has leads remaining.
 4. Check the agent's internet connection — ReadyMode requires a stable connection.
-5. If all checks pass and still no pickups: escalate to manager.
+5. If all checks pass and still no pickups: escalate to ReadyMode support at **1-800-694-1049**.
 
 ---
 
-## S04 — License Error
+## S04 — License Error ("We're Sorry")
 
-**Trigger:** Agent cannot log in — "license in use" or "no available license" error.
+**Trigger:** Agent cannot log in — "We're sorry..." license error.
 
 **Response:** Automatically trigger `clear_licenses.sh` to sign out inactive users and free the license. Confirm completion in Discord.
 
@@ -89,43 +91,42 @@ These are the 13 scenarios where the agent provides support guidance to managers
 
 ---
 
-## S09 — Call Results: Type A
+## S09 — Duplicate Leads — Correction Upload
 
-**Trigger:** Manager asks about call result type A.
+**Trigger:** Manager uploaded leads with a mistake (wrong column mapping, missing field) and needs to correct them.
 
-**Response:** Explain what Type A call results represent and when to use them. (Content to be confirmed with client — see R32 in compliance matrix.)
-
----
-
-## S10 — Call Results: Type B
-
-**Trigger:** Manager asks about call result type B.
-
-**Response:** Explain what Type B call results represent and when to use them. (Content to be confirmed with client.)
+**Response:** Advise using **Merge duplicates** mode when re-uploading. This updates existing records without creating duplicate entries. The corrected fields overwrite the previous values.
 
 ---
 
-## S11 — Call Results: Normal
+## S10 — Duplicate Leads — Survey Uploads
 
-**Trigger:** Manager asks about normal call results.
+**Trigger:** Manager is uploading survey leads that already exist in the system as paid leads.
 
-**Response:** Explain the normal call result category and when to use it. (Content to be confirmed with client.)
-
----
-
-## S12 — Agent Showing as Available But Not Taking Calls
-
-**Trigger:** Manager sees agent as "available" in ReadyMode but the agent is not receiving calls.
-
-**Response flow:**
-1. Verify the agent's playlist is active and has states within calling hours.
-2. Ask the agent to log out and log back in to refresh their session state.
-3. If still not working: check whether the agent was recently added to the playlist — there may be a sync delay.
+**Response:** Advise using **Accept duplicates** mode. This allows the same phone number to be re-uploaded and treated as a new lead entry, regardless of whether it already exists in the campaign.
 
 ---
 
-## S13 — General Escalation
+## S11 — Duplicate Leads — High Duplicate Volume
 
-**Trigger:** Any issue that the bot cannot resolve through the above scenarios.
+**Trigger:** Manager has a file with many leads that already exist in the system and re-uploading would create unmanageable duplicates.
 
-**Response:** Acknowledge the issue, provide any relevant diagnostic information already gathered, and instruct the manager to contact ReadyMode support at **1-800-694-1049 ext. 4**.
+**Response:** Advise using the **Move leads** approach instead of re-uploading. Find the lead in ReadyMode's search bar and use the move function to transfer it to the requested campaign. This is cleaner than a bulk upload when duplicates are the majority.
+
+---
+
+## S12 — Call Results — Standard Campaigns
+
+**Trigger:** Manager or agent asks which call results to use for a standard campaign.
+
+**Response:** Use **Normal call results** for standard campaigns. This is the default result type for regular outbound dialing campaigns.
+
+---
+
+## S13 — Call Results — Personal or Team Campaigns
+
+**Trigger:** Manager or agent asks which call results to use for a personal or team-based campaign.
+
+**Response:** Use **Type “A” call results** for personal and team campaigns. Type A is designed for campaigns that track individual agent performance or team-level outcomes rather than standard outbound metrics.
+
+> **Note on Type “B” call results:** Used for new agencies onboarded to the platform. If a manager asks about call results for a newly onboarded agency, advise Type "B" call results.
